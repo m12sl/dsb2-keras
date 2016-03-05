@@ -40,16 +40,17 @@ def train_hard(config):
     X /= 255.0
 
     y = np.load(config.y)
-    weights = []
 
-    with open(config.meta, 'r') as fin:
-        fin.readline()
-        for line in fin:
-            s = line.replace('\n','').split(',')
-            w = float(s[2])
-            weights.append(w)
-    weights = np.array(weights).reshape(-1, 1)
-    y = np.hstack([y, weights])
+    if config.weighted:
+        weights = []
+        with open(config.meta, 'r') as fin:
+            fin.readline()
+            for line in fin:
+                s = line.replace('\n','').split(',')
+                w = float(s[2])
+                weights.append(w)
+        weights = np.array(weights).reshape(-1, 1)
+        y = np.hstack([y, weights])
     print('Done.')
     print('Shuffle and split')
 
@@ -62,8 +63,8 @@ def train_hard(config):
 
     gc.collect()
     print('Load model')
-    model = w_simple_model()
-    # model = get_model()
+    # model = w_simple_model()
+    model = get_model()
 
     nb_iter = 200
     epochs_per_iter = 1
@@ -92,12 +93,25 @@ def train_hard(config):
     checkpointer_best = ModelCheckpoint(filepath=config.w_path + 'weights_best.hdf5', verbose=1, save_best_only=True)
     checkpointer = ModelCheckpoint(filepath=config.w_path + 'weights.hdf5', verbose=1, save_best_only=False)
 
-    hist = model.fit_generator(datagen.flow(X_train, y_train[:, config.col], batch_size=batch_size),
-                                           samples_per_epoch=X_train.shape[0],
-                                           nb_epoch=nb_iter, show_accuracy=False,
-                                           validation_data=(X_test, y_test[:, config.col]),
-                                           callbacks=[checkpointer, checkpointer_best],
-                                           nb_worker=config.nb)
+    def weight_wrapper(data_flow):
+        for X_batch, y_batch in data_flow:
+            yield X_batch, y_batch[:, 0], y_batch[:, 1]
+
+    if config.weighted:
+        dataFlow = weight_wrapper(datagen.flow(X_train, 
+                                               y_train[:, [config.col, -1]],
+                                               batch_size=batch_size))
+    else:
+        dataFlow = datagen.flow(X_train, y_train[:, config.col],
+                                batch_size=batch_size)
+
+
+    hist = model.fit_generator(dataFlow,
+                               samples_per_epoch=X_train.shape[0],
+                               nb_epoch=nb_iter, show_accuracy=False,
+                               validation_data=(X_test, y_test[:, config.col]),
+                               callbacks=[checkpointer, checkpointer_best],
+                               nb_worker=config.nb)
 
     loss = hist.history['loss'][-1]
     val_loss = hist.history['val_loss'][-1]
@@ -110,9 +124,10 @@ def train_hard(config):
 
 
 def run_simple():
-    Config = namedtuple('Config', ['seed', 'x', 'y', 'meta', 'col', 'nb', 'w_path', 'pred_path'])
+    Config = namedtuple('Config', ['seed', 'weighted', 'x', 'y', 'meta', 'col', 'nb', 'w_path', 'pred_path'])
     seed = 19595
     config_systole = Config(seed,
+                            False,
                             '/mnt/pre-clip-mm2-X-train.npy',
                             '/mnt/pre-clip-mm2-y-train-mm2.npy',
                             '/mnt/pre-clip-mm2-meta-train.csv',
@@ -125,6 +140,7 @@ def run_simple():
     gc.collect()
 
     config_diastole = Config(seed,
+                             False,
                             '/mnt/pre-clip-mm2-X-train.npy',
                             '/mnt/pre-clip-mm2-y-train-mm2.npy',
                             '/mnt/pre-clip-mm2-meta-train.csv',
@@ -137,28 +153,30 @@ def run_simple():
 
 
 def run_weighted():
-    Config = namedtuple('Config', ['seed', 'x', 'y', 'meta', 'col', 'nb', 'w_path', 'pred_path'])
+    Config = namedtuple('Config', ['seed', 'weighted', 'x', 'y', 'meta', 'col', 'nb', 'w_path', 'pred_path'])
     seed = 19595
     config_systole = Config(seed,
+                            True,
                             '/mnt/pre-w-mm2--X-train.npy',
                             '/mnt/pre-w-mm2--y-train-mm2.npy',
                             '/mnt/pre-w-mm2--meta-train.csv',
-                            (0, 2),
-                            1,
-                            '/data/backup/mar5/stage1-systole-w-mm2-',
-                            '/data/backup/mar5/stage1-systole-w-mm2-train-predict.npy')
+                            0,
+                            8,
+                            '/data/backup/mar5_weighted/stage1-systole-w-mm2-',
+                            '/data/backup/mar5_weighted/stage1-systole-w-mm2-train-predict.npy')
 
     train_hard(config_systole)
     gc.collect()
 
     config_diastole = Config(seed,
+                             True,
                             '/mnt/pre-w-mm2--X-train.npy',
                             '/mnt/pre-w-mm2--y-train-mm2.npy',
                             '/mnt/pre-w-mm2--meta-train.csv',
-                            (1, 2),
                             1,
-                            '/data/backup/mar5/stage1-diastole-w-mm2-',
-                            '/data/backup/mar5/stage1-diastole-w-mm2-train-predict.npy')
+                            8,
+                            '/data/backup/mar5_weighted/stage1-diastole-w-mm2-',
+                            '/data/backup/mar5_weighted/stage1-diastole-w-mm2-train-predict.npy')
 
     train_hard(config_diastole)
 
