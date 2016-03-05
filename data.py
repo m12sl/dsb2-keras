@@ -1,187 +1,322 @@
 from __future__ import print_function
 
 import os
-import numpy as np
+import re
+import time
 import dicom
+import numpy as np
 from scipy.misc import imresize
+from tqdm import tqdm
+from multiprocessing import Pool
+from skimage.restoration import denoise_tv_chambolle
+
+import csv
+import click
+from collections import namedtuple, defaultdict
+
+# Meta definition should placed here because of pickling in Multiprocessing
+Meta = namedtuple('Meta', ['mm2', 'loc', 'age', 'sex', 'path'])
+IMG_SHAPE = (64, 64)
 
 
-DATA_DIR = '../'
+def load_images(files):
+    def crop_resize(img):
+        if img.shape[0] < img.shape[1]:
+            img = img.T
+         # we crop image from center
+        short_edge = min(img.shape[:2])
+        yy = int((img.shape[0] - short_edge) / 2)
+        xx = int((img.shape[1] - short_edge) / 2)
+        crop_img = img[yy: yy + short_edge, xx: xx + short_edge]
+        img = crop_img
+        # be careful! imresize will return UINT8 array
+        img = imresize(img, IMG_SHAPE)
+        return img
 
-img_resize = True
-img_shape = (64, 64)
+    images = []
 
+    dc = dicom.read_file(files[0])
+    age = getattr(dc, 'PatientAge', '000Y')
+    sex = getattr(dc, 'PatientSex', 'M')
+    px, py = getattr(dc, 'PixelSpacing', (1.5, 1.5))
+    px, py = float(px), float(py)
+    w, h = dc.pixel_array.shape
+    st = int(getattr(dc, 'SliceThickness', 8))
+    loc = float(getattr(dc, 'SliceLocation'))
+    mm2 = (px * min([w, h]) / IMG_SHAPE[0]) ** 2
 
-def crop_resize(img):
-    """
-    Crop center and resize.
-
-    :param img: image to be cropped and resized.
-    """
-    if img.shape[0] < img.shape[1]:
-        img = img.T
-    # we crop image from center
-    short_edge = min(img.shape[:2])
-    yy = int((img.shape[0] - short_edge) / 2)
-    xx = int((img.shape[1] - short_edge) / 2)
-    crop_img = img[yy: yy + short_edge, xx: xx + short_edge]
-    img = crop_img
-    img = imresize(img, img_shape)
-    return img
-
-
-def load_images(from_dir, verbose=True):
-    """
-    Load images in the form study x slices x width x height.
-    Each image contains 30 time series frames so that it is ready for the convolutional network.
-
-    :param from_dir: directory with images (train or validate)
-    :param verbose: if true then print data
-    """
-    print('-'*50)
-    print('Loading all DICOM images from {0}...'.format(from_dir))
-    print('-'*50)
-
-    current_study_sub = ''  # saves the current study sub_folder
-    current_study = ''  # saves the current study folder
-    current_study_images = []  # holds current study images
-    ids = []  # keeps the ids of the studies
-    study_to_images = dict()  # dictionary for studies to images
-    total = 0
-    images = []  # saves 30-frame-images
-    from_dir = from_dir if from_dir.endswith('/') else from_dir + '/'
-    for subdir, _, files in os.walk(from_dir):
-        subdir = subdir.replace('\\', '/')  # windows path fix
-        subdir_split = subdir.split('/')
-        study_id = subdir_split[-3]
-        if "sax" in subdir:
-            for f in files:
-                image_path = os.path.join(subdir, f)
-                if not image_path.endswith('.dcm'):
-                    continue
-
-                image = dicom.read_file(image_path)
-                image = image.pixel_array.astype(float)
-                image /= np.max(image)  # scale to [0,1]
-                if img_resize:
-                    image = crop_resize(image)
-
-                if current_study_sub != subdir:
-                    x = 0
-                    try:
-                        while len(images) < 30:
-                            images.append(images[x])
-                            x += 1
-                        if len(images) > 30:
-                            images = images[0:30]
-
-                    except IndexError:
-                        pass
-                    current_study_sub = subdir
-                    current_study_images.append(images)
-                    images = []
-
-                if current_study != study_id:
-                    study_to_images[current_study] = np.array(current_study_images)
-                    if current_study != "":
-                        ids.append(current_study)
-                    current_study = study_id
-                    current_study_images = []
-                images.append(image)
-                if verbose:
-                    if total % 1000 == 0:
-                        print('Images processed {0}'.format(total))
-                total += 1
-    x = 0
-    try:
-        while len(images) < 30:
-            images.append(images[x])
-            x += 1
-        if len(images) > 30:
-            images = images[0:30]
-    except IndexError:
-        pass
-
-    print('-'*50)
-    print('All DICOM in {0} images loaded.'.format(from_dir))
-    print('-'*50)
-
-    current_study_images.append(images)
-    study_to_images[current_study] = np.array(current_study_images)
-    if current_study != "":
-        ids.append(current_study)
-
-    return ids, study_to_images
-
-
-def map_studies_results():
-    """
-    Maps studies to their respective targets.
-    """
-    id_to_results = dict()
-    train_csv = open(os.path.join(DATA_DIR, 'train.csv'))
-    lines = train_csv.readlines()
-    i = 0
-    for item in lines:
-        if i == 0:
-            i = 1
+    for f in files:
+        try:
+            dc = dicom.read_file(f)
+            image = dc.pixel_array.astype(np.float32, copy=False)
+            image = image / np.max(image)
+            resized = crop_resize(image)
+            resized = resized.astype(np.float32, copy=False)
+            resized /= np.max(resized)
+            denoised = denoise_tv_chambolle(resized, weight=0.1, multichannel=False)
+            images.append(denoised)
+        except Exception as err:
+            print('ERROR', err, f)
             continue
-        id, diastole, systole = item.replace('\n', '').split(',')
-        id_to_results[id] = [float(diastole), float(systole)]
+    images = np.array(images).astype(np.float32, copy=False)
 
-    return id_to_results
+    meta = Meta(mm2, loc, age, sex, files[0])
+    return (meta, images)
 
 
-def write_train_npy():
+def process_slice(task):
+    study_id, files = task
+    meta, images = load_images(files)
+    return (study_id, meta, images)
+
+
+def read_sax_folder(path):
+    files = []
+    for x in os.listdir(path):
+        r = re.search('(\d+)-(\d+)\.dcm', x)
+        if r is None:
+            continue
+        m = int(r.group(2))
+        files.append((m, x))
+
+    files = [os.path.join(path, t[1]) for t in sorted(files)]
+    return files
+
+
+def hierarchical_load(path):
+    all_studies = []
+    for x in os.listdir(path):
+        r = re.match('\d+', x)
+        if r is None:
+            continue
+        else:
+            all_studies.append((int(r.group()), x))
+
+    all_studies.sort()
+    studies = []
+
+    for (study_id, study_dir) in all_studies:
+        p = os.path.join(path, study_dir, 'study')
+        study_saxes_paths = []
+        for x in os.listdir(p):
+            r = re.match('sax_(\d+)', x)
+            if r is None:
+                continue
+            m = int(r.group(1))
+            study_saxes_paths.append((m, x))
+
+
+        study_saxes_paths = [os.path.join(p, t[1]) for t in sorted(study_saxes_paths)]
+        study_slices_paths = []
+
+        for sax_path in study_saxes_paths:
+            sax_files = read_sax_folder(sax_path)
+            if len(sax_files) == 30:
+                study_slices_paths.append(sax_files)
+            if len(sax_files) < 30:
+                study_slices_paths.append(sax_files + sax_files[:30 - len(sax_files)])
+            if len(sax_files) > 30:
+                study_slices_paths.extend(zip(*[iter(sax_files)] * 30))
+        # we want not saxes, but slices!
+        studies.append((study_id, study_slices_paths))
+    return studies
+
+
+def process_dataset_wslice(path, prefix, jobs=4):
+    """
+        Try to add weights for every slice based on distance to mid
+    """
+    ds = 'wtf'
+    if 'train' in path:
+        ds = 'train'
+    if 'validate' in path:
+        ds = 'validate'
+
+    h_tasks = hierarchical_load(path)
+    # we can use hierarchical information, for fourier or geometric
+    flat_tasks = []
+    for (study_id, slices) in h_tasks:
+        for s in slices:
+            flat_tasks.append((study_id, s))
+    print('We have {} tasks'.format(len(flat_tasks)))
+    print('Process the tasks with {} workers'.format(jobs))
+    t0 = time.time()
+    pool = Pool(processes=jobs)
+    # process_slice should return (study_id, meta, images_bulk)
+    it = pool.imap_unordered(process_slice, flat_tasks)
+    work = list(tqdm(it))
+    pool.close()
+    pool.join()
+    t1 = time.time()
+    print('Done for {}s'.format(t1 - t0))
+    print('-' * 50)
+    print('Post-process data')
+
+    studies = defaultdict(list)
+
+    for (study_id, meta, images) in tqdm(work):
+        studies[study_id].append((meta, images))
+
+    X = []
+    metas = []
+    for study_id, payload in studies.items():
+        payload.sort(key=lambda t: t[0].loc)
+        locs = [t[0].loc for t in payload]
+        w = np.array(locs)
+        rc = 0.5 * (w[-1] + w[0])
+        mc = 0.55 * (w[-1] - w[0])
+        w = 1 - ((w - rc) / mc) ** 2
+
+        a, b = zip(*payload)
+        payload = zip(a, b, list(w))
+
+        # determine the w
+        for meta, images, w in payload:
+            # let's use hard threshold
+            # if w < 0.7:
+            #     continue
+            X.append(images)
+            metas.append((study_id, meta.mm2, w, meta.age, meta.sex, meta.path))
+
+    # X = []
+    # metas = []
+    # for (study_id, meta, images) in tqdm(work):
+    #     X.append(images)
+    #     metas.append((study_id, meta.mm2, meta.age, meta.sex, meta.path))
+
+    X = np.array(X)
+    X *= 255.0
+    X = X.astype(np.uint8, copy=False)
+
+    fname = '{}-X-{}.npy'.format(prefix, ds)
+    np.save(fname, X)
+
+    print('{} contains prepared array with shape {} at np.uint8'.format(fname, X.shape))
+    meta_name = '{}-meta-{}.csv'.format(prefix, ds)
+    header = ['id', 'mm2', 'w', 'age', 'sex', 'path']
+    with open(meta_name, 'w') as fout:
+        w = csv.writer(fout, lineterminator='\n')
+        w.writerow(header)
+        w.writerows(metas)
+
+    print('{} contains meta with {}'.format(meta_name, str(header)))
+    return (fname, meta_name, metas)
+
+
+def process_dataset_simple(path, prefix, jobs=4):
+    ds = 'wtf'
+    if 'train' in path:
+        ds = 'train'
+    if 'validate' in path:
+        ds = 'validate'
+
+    h_tasks = hierarchical_load(path)
+    # we can use hierarchical information, for fourier or geometric
+    flat_tasks = []
+    for (study_id, slices) in h_tasks:
+        for s in slices:
+            flat_tasks.append((study_id, s))
+    print('We have {} tasks'.format(len(flat_tasks)))
+    print('Process the tasks with {} workers'.format(jobs))
+    t0 = time.time()
+    pool = Pool(processes=jobs)
+    # process_slice should return (study_id, meta, images_bulk)
+    it = pool.imap_unordered(process_slice, flat_tasks)
+    work = list(tqdm(it))
+    pool.close()
+    pool.join()
+    t1 = time.time()
+    print('Done for {}s'.format(t1 - t0))
+    print('-' * 50)
+    print('Post-process data')
+    t0 = time.time()
+    X = []
+    metas = []
+    for (study_id, meta, images) in tqdm(work):
+        X.append(images)
+        metas.append((study_id, meta.mm2, meta.age, meta.sex, meta.path))
+    X = np.array(X)
+    X *= 255.0
+    X = X.astype(np.uint8, copy=False)
+
+    fname = '{}-X-{}.npy'.format(prefix, ds)
+    np.save(fname, X)
+
+    print('{} contains prepared array with shape {} at np.uint8'.format(fname, X.shape))
+    meta_name = '{}-meta-{}.csv'.format(prefix, ds)
+    header = ['id', 'mm2', 'age', 'sex', 'path']
+    with open(meta_name, 'w') as fout:
+        w = csv.writer(fout, lineterminator='\n')
+        w.writerow(header)
+        w.writerows(metas)
+
+    print('{} contains meta with {}'.format(meta_name, str(header)))
+    t1 = time.time()
+    print('Done for {}s'.format(t1 - t0))
+    return (fname, meta_name, metas)
+
+
+def write_train_npy(data_dir, save_prefix):
     """
     Loads the training data set including X and y and saves it to .npy file.
     """
-    print('-'*50)
-    print('Writing training data to .npy file...')
-    print('-'*50)
+    print('-' * 50)
+    print('Prepare the train')
 
-    study_ids, images = load_images(os.path.join(DATA_DIR, 'train'))  # load images and their ids
-    studies_to_results = map_studies_results()  # load the dictionary of studies to targets
-    X = []
+    t0 = time.time()
+    path = os.path.join(data_dir, 'train')
+    # fname, meta_name, metas = process_dataset_simple(path, save_prefix, jobs=4)
+    fname, meta_name, metas = process_dataset_wslice(path, save_prefix, jobs=4)
+    t1 = time.time()
+    print('Done for {:.2f}s'.format(t1 - t0))
+    print('Read train table')
+    t0 = time.time()
+    train_table = {}
+    path = os.path.join(data_dir, 'train.csv')
+    with open(path, 'r') as fin:
+        for line in fin.readlines()[1:]:
+            s = line.replace('\n', '').split(',')
+            train_table[int(s[0])] = (float(s[1]), float(s[2]))
+    print('- . ' * 10)
+    print('Construct y-train')
     y = []
+    for line in metas:
+        study_id = line[0]
+        mm2 = line[1]
+        s_volume, d_volume = train_table[study_id]
+        y.append( (s_volume / mm2, d_volume / mm2))
 
-    for study_id in study_ids:
-        study = images[study_id]
-        outputs = studies_to_results[study_id]
-        for i in range(study.shape[0]):
-            X.append(study[i, :, :, :])
-            y.append(outputs)
-
-    X = np.array(X, dtype=np.uint8)
     y = np.array(y)
-    np.save(os.path.join(DATA_DIR, 'X_train.npy'), X)
-    np.save(os.path.join(DATA_DIR, 'y_train.npy'), y)
-    print('Done.')
+    y_name = '{}-y-train-{}.npy'.format(save_prefix, 'mm2')
+    np.save(y_name, y)
+    print('{} contains normed volumes {}'.format(y_name, y.shape))
+
+    t1 = time.time()
+    print('Done for {:.2f}s'.format(t1 - t0))
 
 
-def write_validation_npy():
+def write_validation_npy(data_dir, save_prefix):
     """
     Loads the validation data set including X and study ids and saves it to .npy file.
     """
-    print('-'*50)
-    print('Writing validation data to .npy file...')
-    print('-'*50)
+    print('-' * 50)
+    print('Prepare the validate')
 
-    ids, images = load_images(os.path.join(DATA_DIR, 'validate'))
-    study_ids = []
-    X = []
-
-    for study_id in ids:
-        study = images[study_id]
-        for i in range(study.shape[0]):
-            study_ids.append(study_id)
-            X.append(study[i, :, :, :])
-
-    X = np.array(X, dtype=np.uint8)
-    np.save(os.path.join(DATA_DIR, 'X_validate.npy'), X)
-    np.save(os.path.join(DATA_DIR, 'ids_validate.npy'), study_ids)
-    print('Done.')
+    t0 = time.time()
+    path = os.path.join(data_dir, 'validate')
+    # fname, meta_name, metas = process_dataset_simple(path, save_prefix, jobs=4)
+    fname, meta_name, metas = process_dataset_wslice(path, save_prefix, jobs=4)
+    t1 = time.time()
+    print('Done for {:.2f}s'.format(t1 - t0))
 
 
-write_train_npy()
-write_validation_npy()
+@click.command()
+@click.option('--data-dir', default='/data/')
+@click.option('--save-prefix', default='/data/pre-mm2-')
+def main(data_dir, save_prefix):
+    write_train_npy(data_dir, save_prefix)
+    write_validation_npy(data_dir, save_prefix)
+
+
+if __name__ == "__main__":
+    main()
