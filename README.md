@@ -1,15 +1,7 @@
-# Keras Deep Learning Tutorial for Kaggle 2nd Annual Data Science Bowl
+# Yet Another Keras Solution for Kaggle 2nd Annual Data Science Bowl
 
-This tutorial shows how to use Keras library (runs on Theano/Tensorflow backends)
-to build deep neural network for
-Kaggle 2nd Annual Data Science Bowl competition. This neural net achieves
-~0.0359 CRPS score on the validation set.
-
-Please note that hyper-parameters were chosen "ad-hoc", which means that
-there is a lot of space for improving the score. Also, with Keras library,
-it is very easy to experiment with various architectures and
-hyper-parameters, so this tutorial could be a good starting point for
-such experimentation.
+Common sense and simple geometric approach with blind cnn in-the-middle.
+Based on Keras end-to-end baseline.
 
 ---
 ## Basic info
@@ -20,6 +12,16 @@ Raw data set for this competition provided by Kaggle is pre-processed by
 ```data.py``` script, where all DICOM images are resized to 64 x 64, and put together
 as a time series of 30 images. Then, these input images are saved to numpy binary file
 (.npy), so that they can be loaded quickly for later training.
+
+**ATTENTION** simple data preprocessing forgets about study order, 
+so take care about samples order by yourself. 
+
+On my notebook with 4 workers it takes about:
+
+ - Train --- 400 seconds
+ 
+ - Validate --- 190 seconds
+
 
 ### Model
 
@@ -54,8 +56,6 @@ but in overall they should drop. The same goes for CRPS estimate on test split.
 Also, during the training, weights for last and best iteration (lowest val. loss) are saved in HDF5 files,
 so that they can be loaded later for generating a submission.
 
-On GeForce GTX 770 GPU, time needed for whole iteration
-(augmenting data + training both models + evaluating CRPS) takes around 3 minutes.
 
 ### Note on CDF
 
@@ -80,15 +80,14 @@ This example depends on the following libraries:
 * scikit-image
 * Theano and/or Tensorflow
 * Keras
+* tqdm
 
-Also, this code should be compatible with Python versions 2.7-3.5.
+Code is tested with Python 3.5.
 
 ### Pre-process the raw data set
 
-In order to extract the raw data (provided by Kaggle) and save it to *.npy* files,
-you should first prepare its structure. Make sure that ```data``` dir is located in the root of
-this project.
-Also, the tree of ```data``` dir must be like:
+
+Also, the tree of ```DATA_DIR``` dir must be like:
 
 ```
 -data
@@ -120,7 +119,8 @@ Running this script will create training and validation data, resize it to 64 x 
 
 ### Train the models
 
-* Run ```python train.py``` to train the models.
+* Run ```python x-train.py --col=XXX``` col could be [0, 1, 2, 3, 4, 5] 
+(sys, dia, sys / mm2, dia / mm2, sys / mm3, dia / mm3)
 
 Check out ```train()``` to modify the number of iterations (epochs), batch size, etc.
 
@@ -131,18 +131,3 @@ Check out ```train()``` to modify the number of iterations (epochs), batch size,
 Check out function ```submission()``` for details. In this example, weights from best iteration
 (lowest val. loss function value) are loaded and used.
 
----
-
-## About Keras
-
-Keras is a minimalist, highly modular neural networks library, written in Python and capable of running on top of either TensorFlow or Theano. It was developed with a focus on enabling fast experimentation. Being able to go from idea to result with the least possible delay is key to doing good research.
-
-Use Keras if you need a deep learning library that:
-
-allows for easy and fast prototyping (through total modularity, minimalism, and extensibility).
-supports both convolutional networks and recurrent networks, as well as combinations of the two.
-supports arbitrary connectivity schemes (including multi-input and multi-output training).
-runs seamlessly on CPU and GPU.
-Read the documentation [Keras.io](http://keras.io/)
-
-Keras is compatible with: Python 2.7-3.5.
