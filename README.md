@@ -131,3 +131,16 @@ Check out ```train()``` to modify the number of iterations (epochs), batch size,
 Check out function ```submission()``` for details. In this example, weights from best iteration
 (lowest val. loss function value) are loaded and used.
 
+
+
+### Pipeline modification
+
+After releasing test we are not able to just run `data.py`. MemoryError kills all work.
+So `fourier.py` is modified for creating middle representation. 
+Every study produces two files:
+ - `samples/{id}.npy` with `np.array of np.uint8 (N, 30, 64, 64)-shaped`,
+ - `{id}.csv` with all corresponding meta data.
+
+Just run ```python fourier.py```.
+ 
+All train/validate data should be composed from these samples. We just didn't see alternatives `\=`.

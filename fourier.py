@@ -4,7 +4,9 @@ from collections import namedtuple
 import time
 from tqdm import tqdm
 from multiprocessing import Pool
+import gc
 
+import os
 import matplotlib.pyplot as plt
 
 from skimage.viewer import CollectionViewer
@@ -27,6 +29,7 @@ MAX_REGRET_ITERATIONS = 10
 SCALE_FACTOR = 1.5
 
 Meta = namedtuple('Meta', ['corner', 'mat', 'loc', 'kx', 'ky', 'iloc', 'age', 'sex', 'path'])
+Sample = namedtuple('Sample', ['id', 'img', 'mm2', 'loc_weight', 'meta', 'method', 'rho'])
 
 
 def centroid(img):
@@ -56,21 +59,21 @@ def drop_out(arr, u0, v0, th):
     newarr = arr.copy()
     newarr[u[idx], v[idx]] = 0.0
     return newarr
-
-def drop_out3(arr, u0, v0, th):
-    u, v = circle(int(u0), int(v0), int(th), arr.shape[1:])
-
-    newarr = np.zeros_like(arr)
-    newarr[:, u, v] = arr[:, u, v]
-
-    # newarr = []
-    # for x in arr:
-    #     y = np.zeros_like(x)
-    #     y[u, v] = x[u, v]
-    #     newarr.append(y)
-
-
-    return newarr
+#
+# def drop_out3(arr, u0, v0, th):
+#     u, v = circle(int(u0), int(v0), int(th), arr.shape[1:])
+#
+#     newarr = np.zeros_like(arr)
+#     newarr[:, u, v] = arr[:, u, v]
+#
+#     # newarr = []
+#     # for x in arr:
+#     #     y = np.zeros_like(x)
+#     #     y[u, v] = x[u, v]
+#     #     newarr.append(y)
+#
+#
+#     return newarr
 
 
 def load_slice(files):
@@ -122,6 +125,8 @@ def process_the_study(task):
 
     data = unsliced
 
+    gc.collect()
+
     locs = [t[1].iloc for t in data]
 
     if len(set(locs)) != len(locs):
@@ -151,6 +156,8 @@ def process_the_study(task):
 
     counter = 0
     condition = True
+
+    gc.collect()
     while condition:
         R = []
         W = []
@@ -219,6 +226,8 @@ def process_the_study(task):
         if counter > MAX_REGRET_ITERATIONS:
             break
 
+    gc.collect()
+
     clean_images = []
 
     samples = []
@@ -235,43 +244,109 @@ def process_the_study(task):
         r_max = min(u0, image.shape[1] - u0 - 1, v0, image.shape[2] - v0 - 1)
 
         # just simple circle mask
-        circle_masked = drop_out3(image, u0, v0, th)
+        # circle-masked
+
         # clean_images.append(circle_masked[0, :, :] / np.max(circle_masked[0, :, :]))
 
-        r = min(r_max, th)
-        while r >= r_min:
-            x = circle_masked[:, u0 - r: u0 + r + 1, v0 - r: v0 + r + 1]
-
-            # don't forget about common sense
-            mm2 = (meta.kx * r / 32) ** 2
-            # clean_images.append(x[0, :, :] / np.max(x))
-
-            # be aware, imresize will scale image to 255.
-            img_cnn = np.array([imresize(y, (64, 64)) for y in x]).astype(np.float32, copy=False)
-            img_cnn /= min(255.0, np.max(img_cnn))
-            # this is sample
-
-            samples.append((study_id, img_cnn, mm2, loc_weight, meta))
-
-            r /= SCALE_FACTOR
-
-
-        #
-        #
-        # # h1 non-zero masked
-        # h1_masked = np.zeros_like(image)
+        # h1-masked
+        # mat = np.zeros_like(image)
         # u, v = np.nonzero(h1)
-        # h1_masked[:, u, v] = image[:, u, v]
-        # clean_images.append(h1_masked[0, :, :] / np.max(h1_masked[0, :, :]))
-        #
-        # # h1 attented
-        # h1_attented = np.zeros_like(image)
-        # h1_attented[:, u, v] = image[:, u, v] * h1[u, v]
-        # clean_images.append(h1_attented[0, :, :] / np.max(h1_attented[0, :, :]))
+        # mat[:, u, v] = image[:, u, v]
 
-    #
+        # # h1-attented
+        # mat = np.zeros_like(image)
+        # mat[:, u, v] = image[:, u, v] * h1[u, v]
+
+        #
+        for method in ['mask', 'h1_mask', 'h1_attend']:
+            mat = np.zeros_like(image)
+
+            if method == 'mask':
+                u, v = circle(int(u0), int(v0), int(th), image.shape[1:])
+                mat[:, u, v] = image[:, u, v]
+
+            if method == 'h1_mask':
+                u, v = np.nonzero(h1)
+                mat[:, u, v] = image[:, u, v]
+
+            if method == 'h1_attend':
+                u, v = np.nonzero(h1)
+                mat[:, u, v] = image[:, u, v] * h1[u, v]
+
+
+            r = min(r_max, th)
+            while r >= r_min:
+                x = mat[:, u0 - r: u0 + r + 1, v0 - r: v0 + r + 1]
+
+                # don't forget about common sense
+                mm2 = (meta.kx * r / 32) ** 2
+                # clean_images.append(x[0, :, :] / np.max(x))
+
+                # be aware, imresize will scale image to 255.
+                img_cnn = np.array([imresize(y, (64, 64)) for y in x]).astype(np.float32, copy=False)
+                img_cnn /= min(255.0, np.max(img_cnn))
+                # this is sample
+                # Sample = namedtuple('Sample', ['id', 'img', 'mm2', 'loc_weight', 'meta', 'method', 'rho'])
+                samples.append(Sample(study_id, img_cnn, mm2, loc_weight, meta, method, r))
+
+                r /= SCALE_FACTOR
+
     # CollectionViewer(clean_images).show()
     return samples
+
+
+def middleware(task):
+    path = '/data/samples/'
+    study_id, slices = task
+    samples = process_the_study(task)
+
+    fname = path + '{}.npy'.format(study_id)
+    sname = path + '{}.csv'.format(study_id)
+
+    if os.path.exists(fname) and os.path.exists(sname):
+        return (fname, sname)
+
+    X = []
+    supp = []
+    for study_id, img, mm2, loc, meta, method, r in samples:
+        X.append(img)
+        supp.append((study_id, mm2, loc, meta.path, method, r, meta.age, meta.sex))
+
+    X = np.array(X)
+    X *= 255.0 / np.max(X)
+    X = X.astype(np.uint8, copy=False)
+
+    np.save(fname, X)
+
+    header = ['id', 'mm2', 'loc_weight', 'path', 'method', 'rho', 'age', 'sex']
+    with open(sname, 'w') as fout:
+        w = csv.writer(fout, lineterminator='\n')
+        w.writerow(header)
+        w.writerows(supp)
+
+    return (fname, sname)
+
+
+def process_all(jobs=8):
+    t0 = time.time()
+    tasks = []
+    for path in ['/data/train', '/data/validate', '/data/test']:
+        h_tasks = hierarchical_load(path)
+        tasks.extend(h_tasks)
+    t1 = time.time()
+    print('{} tasks loaded for {}s'.format(len(tasks), t1 - t0))
+
+    t0 = time.time()
+
+    pool = Pool(processes=jobs)
+    it = pool.imap_unordered(middleware, tasks)
+    work = list(tqdm(it))
+
+    pool.close()
+    pool.join()
+    t1 = time.time()
+
+    print('Done for {}s'.format(t1 - t0))
 
 
 def process_dataset_fourier(path, prefix, jobs=4):
@@ -310,13 +385,9 @@ def process_dataset_fourier(path, prefix, jobs=4):
         X.append(images)
         metas.append((study_id, mm2, loc_weight, meta.age, meta.sex, meta.path))
 
-    X = np.array(X)
-    X *= 255.0
-    X = X.astype(np.uint8, copy=False)
-    fname = '{}-X-{}.npy'.format(prefix, ds)
-
-    np.save(fname, X)
-    print('{} data saved to {} with shape {} at np.uint8'.format(ds, fname, X.shape))
+    # Memory Error will kill all work \=
+    # So, let's try the kludge
+    gc.collect()
 
     meta_name = '{}-meta-{}.csv'.format(prefix, ds)
     header = ['id', 'mm2', 'loc_weight', 'age', 'sex', 'path']
@@ -326,11 +397,22 @@ def process_dataset_fourier(path, prefix, jobs=4):
         w.writerows(metas)
 
     print('{} contains meta with {}'.format(meta_name, str(header)))
+    del metas
+    gc.collect()
+
+    # We can try to make X by sequence of pop and concats
+
+    X = np.array(X)
+    X *= 255.0
+    X = X.astype(np.uint8, copy=False)
+    fname = '{}-X-{}.npy'.format(prefix, ds)
+
+    np.save(fname, X)
+    print('{} data saved to {} with shape {} at np.uint8'.format(ds, fname, X.shape))
+
+
     return (fname, meta_name, metas)
 
 
 if __name__ == "__main__":
-    h_tasks = hierarchical_load('../train')
-    print(len(h_tasks))
-
-    samples = process_the_study(h_tasks[1])
+    process_all(8)
