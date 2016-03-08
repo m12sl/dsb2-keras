@@ -14,6 +14,13 @@ def root_mean_squared_error(y_true, y_pred):
     """
     return K.sqrt(K.mean(K.square(y_pred - y_true), axis=-1))
 
+# It seems working. But... let's use sample_weight ")
+def wrmse(wy_true, wy_pred):
+    # needed because of (n, ) and (n, 1) is very different shapes for Backend:
+    y_pred = wy_pred[:, 0]
+    y_true, w = wy_true[:, 0], wy_true[:,1]
+    return K.sqrt(K.mean(K.square(w * (y_pred - y_true)), axis=-1))
+
 
 def center_normalize(x):
     """
@@ -22,7 +29,7 @@ def center_normalize(x):
     return (x - K.mean(x)) / K.std(x)
 
 
-def get_model():
+def simple_model(pretrained_weights_path=None):
     model = Sequential()
     model.add(Activation(activation=center_normalize, input_shape=(30, 64, 64)))
 
@@ -55,63 +62,12 @@ def get_model():
     model.add(Dropout(0.5))
     model.add(Dense(1))
 
-    # mb im wrong
+    # mb im wrong about lr
     adam = Adam(lr=0.001)
+
+    if pretrained_weights_path:
+        model.load_weights(pretrained_weights_path)
+
+    # We will use builtin sample_weight mechanism, no kludge needed ;)
     model.compile(optimizer=adam, loss=root_mean_squared_error)
-    return model
-
-# FAILED
-def wrmse(wy_true, y_pred):
-    """
-    RMSE loss function for
-    """
-    y_true, w = wy_true[:, 0], wy_true[:,1]
-    print(dir(wy_true.shape))
-    print(wy_true.shape)
-    print(dir(y_pred.shape))
-    print(y_pred.shape)
-    print(y_pred)
-    return K.sqrt(K.mean(K.square(w * (y_pred - y_true)), axis=-1))
-
-
-def w_simple_model(weights_path=None):
-    model = Sequential()
-    model.add(Activation(activation=center_normalize, input_shape=(30, 64, 64)))
-
-    model.add(Convolution2D(64, 3, 3, border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(Convolution2D(64, 3, 3, border_mode='valid'))
-    model.add(Activation('relu'))
-    model.add(ZeroPadding2D(padding=(1, 1)))
-    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))
-    model.add(Dropout(0.25))
-
-    model.add(Convolution2D(96, 3, 3, border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(Convolution2D(96, 3, 3, border_mode='valid'))
-    model.add(Activation('relu'))
-    model.add(ZeroPadding2D(padding=(1, 1)))
-    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))
-    model.add(Dropout(0.25))
-
-    model.add(Convolution2D(128, 2, 2, border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(Convolution2D(128, 2, 2, border_mode='same'))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(2, 2), strides=(2, 2)))
-    model.add(Dropout(0.25))
-
-    model.add(Flatten())
-    model.add(Dense(1024, W_regularizer=l2(1e-3)))
-    model.add(Activation('relu'))
-    model.add(Dropout(0.5))
-    model.add(Dense(1))
-
-    # mb im wrong
-    adam = Adam(lr=0.001)
-
-    if weights_path:
-        model.load_weights(weights_path)
-
-    model.compile(optimizer=adam, loss=wrmse)
     return model
