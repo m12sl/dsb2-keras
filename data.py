@@ -14,6 +14,8 @@ import csv
 import click
 from collections import namedtuple, defaultdict
 
+from fourier import process_dataset_fourier
+
 # Meta definition should placed here because of pickling in Multiprocessing
 Meta = namedtuple('Meta', ['mm2', 'loc', 'age', 'sex', 'path'])
 IMG_SHAPE = (64, 64)
@@ -256,7 +258,7 @@ def process_dataset_simple(path, prefix, jobs=4):
     return (fname, meta_name, metas)
 
 
-def write_train_npy(data_dir, save_prefix):
+def write_train_npy(data_dir, save_prefix, method=None):
     """
     Loads the training data set including X and y and saves it to .npy file.
     """
@@ -266,7 +268,11 @@ def write_train_npy(data_dir, save_prefix):
     t0 = time.time()
     path = os.path.join(data_dir, 'train')
     # fname, meta_name, metas = process_dataset_simple(path, save_prefix, jobs=4)
-    fname, meta_name, metas = process_dataset_wslice(path, save_prefix, jobs=4)
+    if method == 'fourier':
+        fname, meta_name, metas = process_dataset_fourier(path, save_prefix, jobs=8)
+    else:
+        fname, meta_name, metas = process_dataset_wslice(path, save_prefix, jobs=8)
+
     t1 = time.time()
     print('Done for {:.2f}s'.format(t1 - t0))
     print('Read train table')
@@ -295,7 +301,7 @@ def write_train_npy(data_dir, save_prefix):
     print('Done for {:.2f}s'.format(t1 - t0))
 
 
-def write_validation_npy(data_dir, save_prefix):
+def write_validation_npy(data_dir, save_prefix, method=None):
     """
     Loads the validation data set including X and study ids and saves it to .npy file.
     """
@@ -305,7 +311,10 @@ def write_validation_npy(data_dir, save_prefix):
     t0 = time.time()
     path = os.path.join(data_dir, 'validate')
     # fname, meta_name, metas = process_dataset_simple(path, save_prefix, jobs=4)
-    fname, meta_name, metas = process_dataset_wslice(path, save_prefix, jobs=4)
+    if method == 'fourier':
+        fname, meta_name, metas = process_dataset_fourier(path, save_prefix, jobs=8)
+    else:
+        fname, meta_name, metas = process_dataset_wslice(path, save_prefix, jobs=8)
     t1 = time.time()
     print('Done for {:.2f}s'.format(t1 - t0))
 
@@ -313,9 +322,10 @@ def write_validation_npy(data_dir, save_prefix):
 @click.command()
 @click.option('--data-dir', default='/data/')
 @click.option('--save-prefix', default='/data/pre-mm2-')
-def main(data_dir, save_prefix):
-    write_train_npy(data_dir, save_prefix)
-    write_validation_npy(data_dir, save_prefix)
+@click.option('--method', default='wslice')
+def main(data_dir, save_prefix, method):
+    write_train_npy(data_dir, save_prefix, method=method)
+    write_validation_npy(data_dir, save_prefix, method=method)
 
 
 if __name__ == "__main__":

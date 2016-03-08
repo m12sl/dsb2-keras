@@ -8,10 +8,11 @@ from multiprocessing import Pool
 import matplotlib.pyplot as plt
 
 from skimage.viewer import CollectionViewer
+import csv
 
 import dicom
 from skimage.draw import circle
-from skimage.filters import gaussian
+from skimage.filters import gaussian_filter
 from scipy.misc import imresize
 
 from data import hierarchical_load
@@ -34,7 +35,7 @@ def get_h1(imgs):
     ff = fftn(imgs)
     h1 = np.absolute(ifftn(ff[1, :, :]))
     scale = np.max(h1)
-    h1 = scale * gaussian(h1 / scale, 5)
+    h1 = scale * gaussian_filter(h1 / scale, 5)
     return h1
 
 def rho_distribution(arr, u0, v0):
@@ -253,12 +254,7 @@ def process_the_study(task):
     return samples
 
 
-
-
-
-
-
-def main(prefix, path):
+def process_dataset_fourier(path, prefix, jobs=4):
     ds = 'wtf'
     if 'train' in path:
         ds = 'train'
@@ -271,13 +267,12 @@ def main(prefix, path):
 
     # samples = process_the_study(h_tasks[0])
 
-    pool = Pool(processes=8)
+    pool = Pool(processes=jobs)
     # process_slice should return (study_id, meta, images_bulk)
     it = pool.imap_unordered(process_the_study, h_tasks)
     work = list(tqdm(it))
     pool.close()
     pool.join()
-
 
     t1 = time.time()
     print("Done for {}s".format(t1 - t0))
@@ -295,10 +290,14 @@ def main(prefix, path):
     fname = '{}-X-{}.npy'.format(prefix, ds)
 
     np.save(fname, X)
-    print('{} data saved to {}'.format(ds, fname))
+    print('{} data saved to {} with shape {} at np.uint8'.format(ds, fname, X.shape))
 
+    meta_name = '{}-meta-{}.csv'.format(prefix, ds)
+    header = ['id', 'mm2', 'loc_weight', 'age', 'sex', 'path']
+    with open(meta_name, 'w') as fout:
+        w = csv.writer(fout, lineterminator='\n')
+        w.writerow(header)
+        w.writerows(metas)
 
-
-
-if __name__ == "__main__":
-    main('tt', '../train')
+    print('{} contains meta with {}'.format(meta_name, str(header)))
+    return (fname, meta_name, metas)
