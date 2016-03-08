@@ -15,6 +15,7 @@ import click
 from collections import namedtuple, defaultdict
 
 from fourier import process_dataset_fourier
+from utils import hierarchical_load
 
 # Meta definition should placed here because of pickling in Multiprocessing
 Meta = namedtuple('Meta', ['mm2', 'loc', 'age', 'sex', 'path'])
@@ -70,58 +71,6 @@ def process_slice(task):
     study_id, files = task
     meta, images = load_images(files)
     return (study_id, meta, images)
-
-
-def read_sax_folder(path):
-    files = []
-    for x in os.listdir(path):
-        r = re.search('(\d+)-(\d+)\.dcm', x)
-        if r is None:
-            continue
-        m = int(r.group(2))
-        files.append((m, x))
-
-    files = [os.path.join(path, t[1]) for t in sorted(files)]
-    return files
-
-
-def hierarchical_load(path):
-    all_studies = []
-    for x in os.listdir(path):
-        r = re.match('\d+', x)
-        if r is None:
-            continue
-        else:
-            all_studies.append((int(r.group()), x))
-
-    all_studies.sort()
-    studies = []
-
-    for (study_id, study_dir) in all_studies:
-        p = os.path.join(path, study_dir, 'study')
-        study_saxes_paths = []
-        for x in os.listdir(p):
-            r = re.match('sax_(\d+)', x)
-            if r is None:
-                continue
-            m = int(r.group(1))
-            study_saxes_paths.append((m, x))
-
-
-        study_saxes_paths = [os.path.join(p, t[1]) for t in sorted(study_saxes_paths)]
-        study_slices_paths = []
-
-        for sax_path in study_saxes_paths:
-            sax_files = read_sax_folder(sax_path)
-            if len(sax_files) == 30:
-                study_slices_paths.append(sax_files)
-            if len(sax_files) < 30:
-                study_slices_paths.append(sax_files + sax_files[:30 - len(sax_files)])
-            if len(sax_files) > 30:
-                study_slices_paths.extend(zip(*[iter(sax_files)] * 30))
-        # we want not saxes, but slices!
-        studies.append((study_id, study_slices_paths))
-    return studies
 
 
 def process_dataset_wslice(path, prefix, jobs=4):

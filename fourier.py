@@ -12,10 +12,14 @@ import csv
 
 import dicom
 from skimage.draw import circle
-from skimage.filters import gaussian_filter
+
+# from skimage.filters import gaussian_filter
+from skimage.filters import gaussian
+
+
 from scipy.misc import imresize
 
-from data import hierarchical_load
+from utils import hierarchical_load
 
 
 HOPE_MULTIPLIER = 1.5
@@ -35,7 +39,8 @@ def get_h1(imgs):
     ff = fftn(imgs)
     h1 = np.absolute(ifftn(ff[1, :, :]))
     scale = np.max(h1)
-    h1 = scale * gaussian_filter(h1 / scale, 5)
+    # h1 = scale * gaussian_filter(h1 / scale, 5)
+    h1 = scale * gaussian(h1 / scale, 5)
     return h1
 
 def rho_distribution(arr, u0, v0):
@@ -101,7 +106,22 @@ def process_the_study(task):
     # here in data we have (images, meta) tuples
 
     data.sort(key=lambda t: t[1].iloc)
-    # todo: drop duplicated ilocs
+
+    # just kludge for working only with uniq slices
+    unsliced = []
+    tmp = set()
+    for t in data:
+        loc = t[1].iloc
+        if loc in tmp:
+            continue
+        unsliced.append(t)
+        tmp.add(loc)
+
+    # todo: take the latest with the same iloc
+    # todo: process dropped slices too
+
+    data = unsliced
+
     locs = [t[1].iloc for t in data]
 
     if len(set(locs)) != len(locs):
@@ -261,7 +281,7 @@ def process_dataset_fourier(path, prefix, jobs=4):
     if 'validate' in path:
         ds = 'validate'
 
-    h_tasks = hierarchical_load(path)[:10]
+    h_tasks = hierarchical_load(path)
     print(len(h_tasks))
     t0 = time.time()
 
@@ -276,6 +296,12 @@ def process_dataset_fourier(path, prefix, jobs=4):
 
     t1 = time.time()
     print("Done for {}s".format(t1 - t0))
+
+    done = []
+    for w in work:
+        done.extend(w)
+
+    work = done
 
     X = []
     metas = []
@@ -301,3 +327,10 @@ def process_dataset_fourier(path, prefix, jobs=4):
 
     print('{} contains meta with {}'.format(meta_name, str(header)))
     return (fname, meta_name, metas)
+
+
+if __name__ == "__main__":
+    h_tasks = hierarchical_load('../train')
+    print(len(h_tasks))
+
+    samples = process_the_study(h_tasks[1])

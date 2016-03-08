@@ -5,6 +5,8 @@ from scipy.stats import norm
 from skimage.restoration import denoise_tv_chambolle
 from scipy import ndimage
 from keras.utils.generic_utils import Progbar
+import os
+import re
 
 
 def crps(true, pred):
@@ -15,6 +17,12 @@ def crps(true, pred):
     :param pred: predicted values
     """
     return np.sum(np.square(true - pred)) / true.size
+
+def real_to_cdf_var(y, vsigma):
+    cdf = np.zeros((y.shape[0], 600))
+    for i in range(y.shape[0]):
+        cdf[i] = norm.cdf(np.linspace(0, 599, 600), y[i], vsigma[i])
+    return cdf
 
 
 def real_to_cdf(y, sigma=1e-10):
@@ -72,3 +80,55 @@ def shift_augmentation(X, h_range, w_range):
             X_shift[i, j] = ndimage.shift(X[i, j], (h_shift, w_shift), order=0)
         progbar.add(1)
     return X_shift
+
+
+
+def read_sax_folder(path):
+    files = []
+    for x in os.listdir(path):
+        r = re.search('(\d+)-(\d+)\.dcm', x)
+        if r is None:
+            continue
+        m = int(r.group(2))
+        files.append((m, x))
+
+    files = [os.path.join(path, t[1]) for t in sorted(files)]
+    return files
+
+
+def hierarchical_load(path):
+    all_studies = []
+    for x in os.listdir(path):
+        r = re.match('\d+', x)
+        if r is None:
+            continue
+        else:
+            all_studies.append((int(r.group()), x))
+
+    all_studies.sort()
+    studies = []
+
+    for (study_id, study_dir) in all_studies:
+        p = os.path.join(path, study_dir, 'study')
+        study_saxes_paths = []
+        for x in os.listdir(p):
+            r = re.match('sax_(\d+)', x)
+            if r is None:
+                continue
+            m = int(r.group(1))
+            study_saxes_paths.append((m, x))
+
+        study_saxes_paths = [os.path.join(p, t[1]) for t in sorted(study_saxes_paths)]
+        study_slices_paths = []
+
+        for sax_path in study_saxes_paths:
+            sax_files = read_sax_folder(sax_path)
+            if len(sax_files) == 30:
+                study_slices_paths.append(sax_files)
+            if len(sax_files) < 30:
+                study_slices_paths.append(sax_files + sax_files[:30 - len(sax_files)])
+            if len(sax_files) > 30:
+                study_slices_paths.extend(zip(*[iter(sax_files)] * 30))
+        # we want not saxes, but slices!
+        studies.append((study_id, study_slices_paths))
+    return studies
