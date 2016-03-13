@@ -15,28 +15,48 @@ import csv
 import dicom
 from skimage.draw import circle
 
-# from skimage.filters import gaussian_filter
-from skimage.filters import gaussian
-
+# last skimage vs previous version
+try:
+    from skimage.filters import gaussian
+except:
+    from skimage.filters import gaussian_filter as gaussian
 
 from scipy.misc import imresize
 
 from utils import hierarchical_load
+from skimage.restoration import denoise_tv_chambolle
 
 
 HOPE_MULTIPLIER = 1.5
 MAX_REGRET_ITERATIONS = 10
 SCALE_FACTOR = 1.5
+IMG_SHAPE = (64, 64)
 
 Meta = namedtuple('Meta', ['corner', 'mat', 'loc', 'kx', 'ky', 'iloc', 'age', 'sex', 'path'])
 Sample = namedtuple('Sample', ['id', 'img', 'mm2', 'loc_weight', 'meta', 'method', 'rho'])
 
+NSample = namedtuple('NSample', ['id', 'imgs', 'method', 'mm2', 'meta', 'rho', 'loc2'])
+
+
+def crop_resize(img):
+    if img.shape[0] < img.shape[1]:
+        img = img.T
+     # we crop image from center
+    short_edge = min(img.shape[:2])
+    yy = int((img.shape[0] - short_edge) / 2)
+    xx = int((img.shape[1] - short_edge) / 2)
+    crop_img = img[yy: yy + short_edge, xx: xx + short_edge]
+    img = crop_img
+    # be careful! imresize will return UINT8 array
+    img = imresize(img, IMG_SHAPE)
+    return img
+
 
 def centroid(img):
-        points = np.nonzero(img)
-        w = img[points]
-        x, y = np.average(np.transpose(points), axis=0, weights=img[points])
-        return x, y, np.sum(img[points])
+    points = np.nonzero(img)
+    w = img[points]
+    x, y = np.average(np.transpose(points), axis=0, weights=img[points])
+    return x, y, np.sum(img[points])
 
 def get_h1(imgs):
     ff = fftn(imgs)
@@ -110,29 +130,19 @@ def process_the_study(task):
 
     data.sort(key=lambda t: t[1].iloc)
 
-    # just kludge for working only with uniq slices
-    unsliced = []
-    tmp = set()
+
+    uniq_slices = []
+    uniq_ilocs = set()
     for t in data:
         loc = t[1].iloc
-        if loc in tmp:
+        if loc in uniq_ilocs:
             continue
-        unsliced.append(t)
-        tmp.add(loc)
-
-    # todo: take the latest with the same iloc
-    # todo: process dropped slices too
-
-    data = unsliced
+        uniq_slices.append(t)
+        uniq_ilocs.add(loc)
+    # now we process only uniq_slices
 
     gc.collect()
-
-    locs = [t[1].iloc for t in data]
-
-    if len(set(locs)) != len(locs):
-        print("Non unique locations in {}".format(study_id))
-
-    images, metas = zip(*data)
+    images, metas = zip(*uniq_slices)
 
     h1s = [get_h1(x) for x in images]
 
@@ -141,7 +151,7 @@ def process_the_study(task):
     # in h1s we have first harmonic
     # don't stack them, because of rare bad series
 
-    # threashold for 5% of maximum
+    # threashold for 5% of maximum just as in the FOURIER Guide
     m = max([np.max(h1) for h1 in h1s])
     min_threshold = 0.05 * m
 
@@ -153,11 +163,14 @@ def process_the_study(task):
     h1s = tmp
 
     prev_center = np.zeros(3)
+    center = np.zeros(3)
+    rho_threshold = 200.0
 
     counter = 0
     condition = True
 
     gc.collect()
+
     while condition:
         R = []
         W = []
@@ -228,75 +241,138 @@ def process_the_study(task):
 
     gc.collect()
 
-    clean_images = []
+    # ok, here we have: center, rho and some staff in metas/params/...
+    # let's recompute u,v,rho_pix for every slice, not only in uniq locations
 
+    images, metas = zip(*data)
+    h1s = [get_h1(x) for x in images]
+
+    m = max([np.max(h1) for h1 in h1s])
+
+    methods = ['std', 'fft-c', 'fft-rho', 'h1-att', 'h1-clip']
     samples = []
+    #
+    for (img, meta, h1) in zip(images, metas, h1s):
+        q = np.cross(meta.mat[0, :], meta.mat[1, :])
+        w = center - meta.corner
 
-    # let's computer params for quadric weights
-    w = np.array([meta.loc for meta in metas])
-    rc = 0.5 * (w[-1] + w[0])
-    mc = 0.55 * (w[-1] - w[0])
+        mu = np.dot(meta.mat[0, :], np.cross(w, q)) / np.dot(meta.mat[0, :], np.cross(meta.mat[1,:], q))
+        la = np.dot(meta.mat[1, :], np.cross(w, q)) / np.dot(meta.mat[1, :], np.cross(meta.mat[0,:], q))
 
-    for image, h1, meta, param in zip(images, h1s, metas, params):
-        loc_weight = 1.0 - ((meta.loc - rc) / mc) ** 2
-        u0, v0, th = param
-        r_min = 32
-        r_max = min(u0, image.shape[1] - u0 - 1, v0, image.shape[2] - v0 - 1)
+        # for debug purpose
+        r_proj = la * meta.mat[0, :] + mu * meta.mat[1, :]
 
-        # just simple circle mask
-        # circle-masked
+        offset = center - r_proj
 
-        # clean_images.append(circle_masked[0, :, :] / np.max(circle_masked[0, :, :]))
+        # coordinates to pixels
+        u0, v0 = int(la / meta.kx), int(mu / meta.ky)
+        rho_pixel = int(rho_threshold / meta.kx)
 
-        # h1-masked
-        # mat = np.zeros_like(image)
-        # u, v = np.nonzero(h1)
-        # mat[:, u, v] = image[:, u, v]
+        # (u0, v0) is the projection of center to slice plane in pixels
+        # rho_pixel is just Rho in pixels.
+        # In cylindric model we will take axis vector into account, but this is spherical model.
 
-        # # h1-attented
-        # mat = np.zeros_like(image)
-        # mat[:, u, v] = image[:, u, v] * h1[u, v]
+        # here we have:
+        # img -- stack of images (30, W, H) for slice
+        # meta -- info for first image, location, for example
+        # h1 -- fft[1] for this stack, for attend or whatever
+        # u0, v0, rho_pixels for cropping
+        # offset is the distance in mm between center of masses and center of projection.
 
-        #
-        for method in ['mask', 'h1_mask', 'h1_attend']:
-            mat = np.zeros_like(image)
+        rho_pixel_max = min(u0, img.shape[1] - u0 - 1, v0, img.shape[2] - v0 - 1)
 
-            if method == 'mask':
-                u, v = circle(int(u0), int(v0), int(th), image.shape[1:])
-                mat[:, u, v] = image[:, u, v]
+        for method in methods:
+            if method == 'std':
+                # this is standard preprocessing: cropp about the center
+                resized = np.array([crop_resize(x) for x in img]).astype(np.float32, copy=False)
+                resized /= np.max(resized)
+                denoised = denoise_tv_chambolle(resized, weight=0.1, multichannel=False)
+                # ['id', 'imgs', 'method', 'mm2', 'meta', 'rho', 'loc2']
+                mm2 = (meta.kx * min(img.shape[1:]) / IMG_SHAPE[0]) ** 2
+                # ['id', 'imgs', 'method', 'mm2', 'meta', 'rho', 'loc2'])
+                samples.append(NSample(study_id, denoised, method, mm2, meta, rho_threshold, offset))
 
-            if method == 'h1_mask':
-                u, v = np.nonzero(h1)
-                mat[:, u, v] = image[:, u, v]
+            if method == 'fft-c':
+                # same as above, but centered on u0, v0
 
-            if method == 'h1_attend':
-                u, v = np.nonzero(h1)
-                mat[:, u, v] = image[:, u, v] * h1[u, v]
+                cropped = img[:,
+                              u0 - rho_pixel_max: u0 + rho_pixel_max + 1,
+                              v0 - rho_pixel_max: v0 + rho_pixel_max + 1]
+                resized = np.array([imresize(x, IMG_SHAPE) for x in cropped]).astype(np.float32, copy=False)
+                resized /= np.max(resized)
 
+                denoised = denoise_tv_chambolle(resized, weight=0.1, multichannel=False)
+                mm2 = (2.0 * meta.kx * rho_pixel_max / IMG_SHAPE[0]) ** 2
 
-            r = min(r_max, th)
-            while r >= r_min:
-                x = mat[:, u0 - r: u0 + r + 1, v0 - r: v0 + r + 1]
+                samples.append(NSample(study_id, denoised, method, mm2, meta, rho_threshold, offset))
 
-                # don't forget about common sense
-                mm2 = (meta.kx * r / 32) ** 2
-                # clean_images.append(x[0, :, :] / np.max(x))
+            if method == 'fft-rho':
+                # only in 7% of total studies rho_pixel > rho_pixel_max, so let's take rho_threshold in use
+                r = min(rho_pixel, rho_pixel_max)
+                cropped = img[:,
+                              u0 - r: u0 + r + 1,
+                              v0 - r: v0 + r + 1]
 
-                # be aware, imresize will scale image to 255.
-                img_cnn = np.array([imresize(y, (64, 64)) for y in x]).astype(np.float32, copy=False)
-                img_cnn /= min(255.0, np.max(img_cnn))
-                # this is sample
-                # Sample = namedtuple('Sample', ['id', 'img', 'mm2', 'loc_weight', 'meta', 'method', 'rho'])
-                samples.append(Sample(study_id, img_cnn, mm2, loc_weight, meta, method, r))
+                resized = np.array([imresize(x, IMG_SHAPE) for x in cropped]).astype(np.float32, copy=False)
+                resized /= np.max(resized)
 
-                r /= SCALE_FACTOR
+                denoised = denoise_tv_chambolle(resized, weight=0.1, multichannel=False)
+                mm2 = (2.0 * meta.kx * rho_pixel_max / IMG_SHAPE[0]) ** 2
 
-    # CollectionViewer(clean_images).show()
+                samples.append(NSample(study_id, denoised, method, mm2, meta, rho_threshold, offset))
+
+            if method == 'h1-att':
+                # let's multiply the image to h1 weight
+                r = min(rho_pixel, rho_pixel_max)
+                cropped = img[:,
+                              u0 - r: u0 + r + 1,
+                              v0 - r: v0 + r + 1]
+
+                h1cropped = h1[u0 - r: u0 + r + 1,
+                               v0 - r: v0 + r + 1]
+
+                u, v = np.nonzero(h1cropped)
+
+                h1attent = np.zeros_like(cropped)
+                h1attent[:, u, v] = cropped[:, u, v] * h1cropped[u, v]
+
+                resized = np.array([imresize(x, IMG_SHAPE) for x in h1attent]).astype(np.float32, copy=False)
+                resized /= np.max(resized)
+                mm2 = (2.0 * meta.kx * rho_pixel_max / IMG_SHAPE[0]) ** 2
+
+                denoised = denoise_tv_chambolle(resized, weight=0.1, multichannel=False)
+                samples.append(NSample(study_id, resized, method, mm2, meta, rho_threshold, offset))
+                samples.append(NSample(study_id, denoised, method + '-tv', mm2, meta, rho_threshold, offset))
+
+            if method == 'h1-clip':
+                # let's multiply the image to h1 weight
+                r = min(rho_pixel, rho_pixel_max)
+                cropped = img[:,
+                              u0 - r: u0 + r + 1,
+                              v0 - r: v0 + r + 1]
+
+                h1cropped = h1[u0 - r: u0 + r + 1,
+                               v0 - r: v0 + r + 1]
+
+                h1cropped[h1cropped < 0.05 * m] = 0
+                u, v = np.nonzero(h1cropped)
+
+                h1attent = np.zeros_like(cropped)
+                h1attent[:, u, v] = cropped[:, u, v]
+
+                resized = np.array([imresize(x, IMG_SHAPE) for x in h1attent]).astype(np.float32, copy=False)
+                resized /= np.max(resized)
+                mm2 = (2.0 * meta.kx * rho_pixel_max / IMG_SHAPE[0]) ** 2
+
+                denoised = denoise_tv_chambolle(resized, weight=0.1, multichannel=False)
+                samples.append(NSample(study_id, resized, method, mm2, meta, rho_threshold, offset))
+                samples.append(NSample(study_id, denoised, method + '-tv', mm2, meta, rho_threshold, offset))
+
     return samples
 
 
 def middleware(task):
-    path = '/data/samples/'
+    path = '/data/nsamples/'
     study_id, slices = task
     samples = process_the_study(task)
 
@@ -308,9 +384,10 @@ def middleware(task):
 
     X = []
     supp = []
-    for study_id, img, mm2, loc, meta, method, r in samples:
+    for study_id, img, method, mm2, meta, rho, offset in samples:
         X.append(img)
-        supp.append((study_id, mm2, loc, meta.path, method, r, meta.age, meta.sex))
+        # study_id, denoised, method + '-tv', mm2, meta, rho_threshold, offset)
+        supp.append((study_id, method, mm2, meta.path, rho, offset))
 
     X = np.array(X)
     X *= 255.0 / np.max(X)
@@ -318,7 +395,7 @@ def middleware(task):
 
     np.save(fname, X)
 
-    header = ['id', 'mm2', 'loc_weight', 'path', 'method', 'rho', 'age', 'sex']
+    header = ['id', 'method', 'mm2', 'path', 'rho', 'offset']
     with open(sname, 'w') as fout:
         w = csv.writer(fout, lineterminator='\n')
         w.writerow(header)
@@ -349,70 +426,23 @@ def process_all(jobs=8):
     print('Done for {}s'.format(t1 - t0))
 
 
-def process_dataset_fourier(path, prefix, jobs=4):
-    ds = 'wtf'
-    if 'train' in path:
-        ds = 'train'
-    if 'validate' in path:
-        ds = 'validate'
-
-    h_tasks = hierarchical_load(path)
+def testrun():
+    h_tasks = hierarchical_load('../train/')
     print(len(h_tasks))
-    t0 = time.time()
 
-    # samples = process_the_study(h_tasks[0])
+    nsamples = process_the_study(h_tasks[10])
+    print('We have {} samples'.format(len(nsamples)))
 
-    pool = Pool(processes=jobs)
-    # process_slice should return (study_id, meta, images_bulk)
-    it = pool.imap_unordered(process_the_study, h_tasks)
-    work = list(tqdm(it))
-    pool.close()
-    pool.join()
+    to_show = []
+    for t in nsamples:
+        to_show.append(t.imgs[0, :, :])
+        to_show.append(t.imgs[1, :, :])
+        to_show.append(t.imgs[10, :, :])
+        to_show.append(t.imgs[20, :, :])
 
-    t1 = time.time()
-    print("Done for {}s".format(t1 - t0))
-
-    done = []
-    for w in work:
-        done.extend(w)
-
-    work = done
-
-    X = []
-    metas = []
-    for sample in work:
-        study_id, images, mm2, loc_weight, meta = sample
-        X.append(images)
-        metas.append((study_id, mm2, loc_weight, meta.age, meta.sex, meta.path))
-
-    # Memory Error will kill all work \=
-    # So, let's try the kludge
-    gc.collect()
-
-    meta_name = '{}-meta-{}.csv'.format(prefix, ds)
-    header = ['id', 'mm2', 'loc_weight', 'age', 'sex', 'path']
-    with open(meta_name, 'w') as fout:
-        w = csv.writer(fout, lineterminator='\n')
-        w.writerow(header)
-        w.writerows(metas)
-
-    print('{} contains meta with {}'.format(meta_name, str(header)))
-    del metas
-    gc.collect()
-
-    # We can try to make X by sequence of pop and concats
-
-    X = np.array(X)
-    X *= 255.0
-    X = X.astype(np.uint8, copy=False)
-    fname = '{}-X-{}.npy'.format(prefix, ds)
-
-    np.save(fname, X)
-    print('{} data saved to {} with shape {} at np.uint8'.format(ds, fname, X.shape))
-
-
-    return (fname, meta_name, metas)
+    CollectionViewer(to_show).show()
 
 
 if __name__ == "__main__":
-    process_all(8)
+    process_all(30)
+    # testrun()
